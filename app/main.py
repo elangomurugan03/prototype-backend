@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 
-import psycopg2
+import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +24,14 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1008
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-app = FastAPI(title="SpecialVidhya Auth API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="SpecialVidhya Auth API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,18 +47,32 @@ class AuthRequest(BaseModel):
     password: str = Field(min_length=6, max_length=128)
 
 
-class ChildDetailsRequest(BaseModel):
-    user_id: int
+class SignupRequest(BaseModel):
+    # Account
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=6, max_length=128)
+
+    # Child (Screen 1)
     child_name: str = Field(min_length=1, max_length=100)
-    child_age: int = Field(ge=1, le=15)
-    child_grade: str | None = Field(None, max_length=50)
+    child_dob: str | None = None
+    child_gender: str | None = None
+    child_class: str | None = None
+    child_school: str | None = None
+    child_board: str | None = None
+    child_languages: str | None = None
 
+    # Academics (Screen 2)
+    subject_marks: dict[str, str] | None = None
+    academic_concerns: list[str] | None = None
 
-class ChildDetailsResponse(BaseModel):
-    id: int
-    child_name: str
-    child_age: int
-    child_grade: str | None
+    # Observations (Screen 3) — dict of question id to 'Yes'/'No'
+    observations: dict[str, str] | None = None
+
+    # Parent (Screen 4)
+    parent_name: str | None = None
+    parent_phone: str | None = None
+    parent_email: str | None = None
+    parent_role: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -81,9 +103,9 @@ def create_access_token(subject: str) -> str:
 
 def get_db_connection():
     try:
-        connection = psycopg2.connect(DATABASE_URL)
+        connection = psycopg.connect(DATABASE_URL)
         return connection
-    except psycopg2.OperationalError as exc:
+    except psycopg.OperationalError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection failed",
@@ -94,29 +116,76 @@ def init_db() -> None:
     connection = get_db_connection()
     cursor = connection.cursor()
     try:
-        cursor.execute(
-            """
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username VARCHAR(50) NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
-        cursor.execute(
-            """
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS child_details (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
                 child_name VARCHAR(100) NOT NULL,
-                child_age INTEGER NOT NULL,
-                child_grade VARCHAR(50),
+                child_dob VARCHAR(30),
+                child_gender VARCHAR(20),
+                child_class VARCHAR(50),
+                child_school VARCHAR(100),
+                child_board VARCHAR(50),
+                child_languages TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            """
-        )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS academic_details (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                english_marks VARCHAR(10),
+                maths_marks VARCHAR(10),
+                social_studies_marks VARCHAR(10),
+                science_marks VARCHAR(10),
+                second_language_marks VARCHAR(10),
+                academic_concerns TEXT[],
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS observations (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                lang1 VARCHAR(5), lang2 VARCHAR(5), lang3 VARCHAR(5),
+                read1 VARCHAR(5), read2 VARCHAR(5), read3 VARCHAR(5),
+                read4 VARCHAR(5), read5 VARCHAR(5), read6 VARCHAR(5),
+                read7 VARCHAR(5), read8 VARCHAR(5), read9 VARCHAR(5),
+                read10 VARCHAR(5), read11 VARCHAR(5), read12 VARCHAR(5),
+                comp1 VARCHAR(5),
+                spell1 VARCHAR(5), spell2 VARCHAR(5), spell3 VARCHAR(5),
+                spell4 VARCHAR(5), spell5 VARCHAR(5),
+                gen1 VARCHAR(5), gen2 VARCHAR(5), gen3 VARCHAR(5),
+                gen4 VARCHAR(5), gen5 VARCHAR(5), gen6 VARCHAR(5),
+                gen7 VARCHAR(5), gen8 VARCHAR(5), gen9 VARCHAR(5),
+                gen10 VARCHAR(5), gen11 VARCHAR(5), gen12 VARCHAR(5),
+                gen13 VARCHAR(5),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS parent_details (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                parent_name VARCHAR(100),
+                parent_phone VARCHAR(20),
+                parent_email VARCHAR(100),
+                parent_role VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         connection.commit()
     finally:
         cursor.close()
@@ -137,37 +206,6 @@ def get_user_by_username(username: str):
         connection.close()
 
 
-def create_user(username: str, password: str, child_name: str | None = None, child_age: int | None = None, child_grade: str | None = None) -> dict:
-    password_hash = hash_password(password)
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    try:
-        cursor.execute(
-            "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id, username",
-            (username, password_hash),
-        )
-        row = cursor.fetchone()
-        connection.commit()
-        if row:
-            user_id = row[0]
-            user_data = {"id": user_id, "username": row[1]}
-            
-            # Store child details if provided
-            if child_name:
-                store_child_details(user_id, child_name, child_age or 5, child_grade)
-            
-            return user_data
-    except psycopg2.IntegrityError as exc:
-        connection.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already exists",
-        ) from exc
-    finally:
-        cursor.close()
-        connection.close()
-
-
 def authenticate_user(username: str, password: str) -> dict:
     user = get_user_by_username(username)
     if user is None or not verify_password(password, user[2]):
@@ -180,48 +218,6 @@ def authenticate_user(username: str, password: str) -> dict:
     return {"id": user[0], "username": user[1]}
 
 
-def store_child_details(user_id: int, child_name: str, child_age: int, child_grade: str | None) -> dict:
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO child_details (user_id, child_name, child_age, child_grade)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET child_name = %s, child_age = %s, child_grade = %s, updated_at = CURRENT_TIMESTAMP
-            RETURNING id, child_name, child_age, child_grade
-            """,
-            (user_id, child_name, child_age, child_grade, child_name, child_age, child_grade),
-        )
-        row = cursor.fetchone()
-        connection.commit()
-        if row:
-            return {"id": row[0], "child_name": row[1], "child_age": row[2], "child_grade": row[3]}
-    except psycopg2.Error as exc:
-        connection.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to store child details",
-        ) from exc
-    finally:
-        cursor.close()
-        connection.close()
-
-
-def get_child_details(user_id: int):
-    connection = get_db_connection()
-    cursor = connection.cursor()
-    try:
-        cursor.execute(
-            "SELECT id, child_name, child_age, child_grade FROM child_details WHERE user_id = %s",
-            (user_id,),
-        )
-        return cursor.fetchone()
-    finally:
-        cursor.close()
-        connection.close()
-
-
 def build_auth_response(user: dict) -> AuthResponse:
     token = create_access_token(subject=user["username"])
     return AuthResponse(
@@ -230,9 +226,118 @@ def build_auth_response(user: dict) -> AuthResponse:
     )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+def create_full_user(payload: SignupRequest) -> dict:
+    password_hash = hash_password(payload.password)
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    try:
+        # 1. users
+        cursor.execute(
+            "INSERT INTO users (username, password_hash) VALUES (%s, %s) RETURNING id, username",
+            (payload.username.strip(), password_hash),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise psycopg.Error("Failed to create user")
+        user_data = {"id": row[0], "username": row[1]}
+
+        # 2. child_details
+        cursor.execute(
+            """
+            INSERT INTO child_details
+            (user_id, child_name, child_dob, child_gender, child_class, child_school, child_board, child_languages)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user_data["id"],
+                payload.child_name,
+                payload.child_dob,
+                payload.child_gender,
+                payload.child_class,
+                payload.child_school,
+                payload.child_board,
+                payload.child_languages,
+            ),
+        )
+
+        # 3. academic_details
+        marks = payload.subject_marks or {}
+        cursor.execute(
+            """
+            INSERT INTO academic_details
+            (user_id, english_marks, maths_marks, social_studies_marks, science_marks, second_language_marks, academic_concerns)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user_data["id"],
+                marks.get("English"),
+                marks.get("Maths"),
+                marks.get("Social Studies"),
+                marks.get("Science"),
+                marks.get("2nd Language"),
+                payload.academic_concerns or [],
+            ),
+        )
+
+        # 4. observations
+        obs = payload.observations or {}
+        cursor.execute(
+            """
+            INSERT INTO observations
+            (user_id,
+             lang1, lang2, lang3,
+             read1, read2, read3, read4, read5, read6, read7, read8, read9, read10, read11, read12,
+             comp1,
+             spell1, spell2, spell3, spell4, spell5,
+             gen1, gen2, gen3, gen4, gen5, gen6, gen7, gen8, gen9, gen10, gen11, gen12, gen13)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                user_data["id"],
+                obs.get("lang1"), obs.get("lang2"), obs.get("lang3"),
+                obs.get("read1"), obs.get("read2"), obs.get("read3"), obs.get("read4"),
+                obs.get("read5"), obs.get("read6"), obs.get("read7"), obs.get("read8"),
+                obs.get("read9"), obs.get("read10"), obs.get("read11"), obs.get("read12"),
+                obs.get("comp1"),
+                obs.get("spell1"), obs.get("spell2"), obs.get("spell3"), obs.get("spell4"), obs.get("spell5"),
+                obs.get("gen1"), obs.get("gen2"), obs.get("gen3"), obs.get("gen4"), obs.get("gen5"),
+                obs.get("gen6"), obs.get("gen7"), obs.get("gen8"), obs.get("gen9"), obs.get("gen10"),
+                obs.get("gen11"), obs.get("gen12"), obs.get("gen13"),
+            ),
+        )
+
+        # 5. parent_details
+        cursor.execute(
+            """
+            INSERT INTO parent_details (user_id, parent_name, parent_phone, parent_email, parent_role)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (
+                user_data["id"],
+                payload.parent_name,
+                payload.parent_phone,
+                payload.parent_email,
+                payload.parent_role,
+            ),
+        )
+
+        connection.commit()
+        return user_data
+    except psycopg.IntegrityError as exc:
+        connection.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already exists",
+        ) from exc
+    except psycopg.Error as exc:
+        connection.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Signup failed",
+        ) from exc
+    finally:
+        cursor.close()
+        connection.close()
 
 
 @app.get("/health")
@@ -241,8 +346,8 @@ def health_check():
 
 
 @app.post("/auth/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-def signup(payload: AuthRequest):
-    user = create_user(payload.username.strip(), payload.password)
+def signup(payload: SignupRequest):
+    user = create_full_user(payload)
     return build_auth_response(user)
 
 
@@ -250,30 +355,3 @@ def signup(payload: AuthRequest):
 def login(payload: AuthRequest):
     user = authenticate_user(payload.username.strip(), payload.password)
     return build_auth_response(user)
-
-
-@app.post("/child/details", response_model=ChildDetailsResponse)
-def save_child_details(payload: ChildDetailsRequest):
-    """
-    Store or update child details for a user.
-    """
-    child_info = store_child_details(
-        payload.user_id, payload.child_name, payload.child_age, payload.child_grade
-    )
-    return ChildDetailsResponse(**child_info)
-
-
-@app.get("/child/details/{user_id}", response_model=ChildDetailsResponse)
-def get_child_info(user_id: int):
-    """
-    Retrieve child details for a user.
-    """
-    child = get_child_details(user_id)
-    if child is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Child details not found for this user",
-        )
-    return ChildDetailsResponse(
-        id=child[0], child_name=child[1], child_age=child[2], child_grade=child[3]
-    )
